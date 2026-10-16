@@ -1,0 +1,29 @@
+# Build output
+/build/
+build/
+
+# Test/integration artifacts
+*.log
+
+# CMake (in-tree build leftovers)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Qt
+*.pro.user
+*.qbs.user
+
+# IDE / editor
+.vscode/
+.idea/
+.cache/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
