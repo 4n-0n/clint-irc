@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
         s.setValue(QStringLiteral("nick"), QStringLiteral("tester"));
         s.setValue(QStringLiteral("user"), QStringLiteral("tuser"));
         s.setValue(QStringLiteral("realname"), QStringLiteral("Test Real"));
+        s.setValue(QStringLiteral("sasluser"), QStringLiteral("saslme"));
         s.setValue(QStringLiteral("channels"), QStringLiteral("#a #b"));
     }
 
@@ -38,6 +39,7 @@ int main(int argc, char** argv) {
     ok = ok && (c.nick == QStringLiteral("tester"));
     ok = ok && (c.user == QStringLiteral("tuser"));
     ok = ok && (c.realName == QStringLiteral("Test Real"));
+    ok = ok && (c.saslUser == QStringLiteral("saslme"));
     ok = ok && (c.autoJoinChannels ==
                 QStringList{QStringLiteral("#a"), QStringLiteral("#b")});
 

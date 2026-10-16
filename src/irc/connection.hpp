@@ -11,6 +11,8 @@
 #include "connection_config.hpp"
 #include "message.hpp"
 
+class QTimer;
+
 namespace irc {
 
 // Explicit connection lifecycle states.
@@ -64,15 +66,35 @@ private slots:
     void onSslErrors(const QList<QSslError>& errors);
 
 private:
+    // SASL PLAIN negotiation substates (only entered when SASL is configured).
+    enum class SaslState {
+        Disabled,     // no SASL configured; skip negotiation
+        CapLs,        // sent CAP LS 302; awaiting the server's CAP * LS
+        CapReq,       // sent CAP REQ :sasl; awaiting CAP * ACK/NAK
+        Authenticate, // sent AUTHENTICATE PLAIN; awaiting AUTHENTICATE +
+        AuthPayload,  // sent AUTHENTICATE <b64>; awaiting 903/904/905/906
+        Done,         // negotiation finished (success or failure); registering
+    };
+
     void setState(ConnectionState state);
     void processBuffer();
     void handleLine(const QByteArray& line);
+
+    // Sends NICK + USER (the registration handshake), shared by the plain and
+    // SASL paths.
+    void sendRegistration();
+    // Advances the SASL state machine for a CAP/AUTHENTICATE/numeric message.
+    void handleSasl(const Message& msg);
+    // Wraps up SASL (CAP END + NICK/USER), regardless of outcome.
+    void finishSasl();
 
     SocketFactory m_factory;
     QAbstractSocket* m_socket = nullptr;
     ConnectionState m_state = ConnectionState::Disconnected;
     ConnectionConfig m_config;
     QByteArray m_buffer; // accumulates partial lines
+    SaslState m_saslState = SaslState::Disabled;
+    QTimer* m_saslTimer = nullptr; // aborts a stalled CAP negotiation
 };
 
 } // namespace irc

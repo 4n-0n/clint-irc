@@ -1,6 +1,7 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QString>
+#include <QTemporaryFile>
 
 #include <cstdio>
 
@@ -10,6 +11,7 @@
 #include "irc/prefix.hpp"
 #include "ui/chat_formatter.hpp"
 #include "ui/completion.hpp"
+#include "ui/fun_actions.hpp"
 #include "ui/input_history.hpp"
 
 static int g_failures = 0;
@@ -136,6 +138,16 @@ int main(int argc, char** argv) {
         CHECK(h == "&lt;a&gt;&amp;&quot;b&quot;", "htmlEscape");
     }
     {
+        const QString h = ui::linkify(QStringLiteral("see https://example.com/x?a=1&b=2 now"));
+        CHECK(h.contains(QStringLiteral("<a href=\"https://example.com/x?a=1&amp;b=2\"")),
+              "linkify wraps URL and escapes ampersands");
+        CHECK(!ui::linkify(QStringLiteral("plain text")).contains(QStringLiteral("<a ")),
+              "linkify no-op without URL");
+        CHECK(ui::linkify(QStringLiteral("go to https://ex.com."))
+                  .contains(QStringLiteral("https://ex.com</a>.")),
+              "linkify strips trailing period");
+    }
+    {
         auto r = parseLine(QByteArrayLiteral(":alice!u@h PRIVMSG #c :hi"));
         const QString html = ui::formatChannelLine(r.value());
         CHECK(html.contains("alice"), "channel line contains sender nick");
@@ -166,6 +178,35 @@ int main(int argc, char** argv) {
               "containsNick rejects embedded substring");
         CHECK(!ui::containsNick(QStringLiteral("hello alice"), QString()),
               "containsNick empty nick -> false");
+    }
+
+    // --- fun /me actions loader ---
+    {
+        const auto defs = ui::defaultFunActions();
+        CHECK(!defs.isEmpty(), "default fun actions non-empty");
+
+        QTemporaryFile f(QStringLiteral("/tmp/clint_actions_XXXXXX"));
+        if (f.open()) {
+            f.write("# comment\n\nWave | waves hello\nDance | dances\nNoSeparator\n");
+            f.flush();
+            const auto loaded = ui::loadFunActions(f.fileName());
+            CHECK(loaded.size() == 3, "loadFunActions parses entries, skips comments/blanks");
+            if (loaded.size() == 3) {
+                CHECK(loaded[0].label == QStringLiteral("Wave") &&
+                          loaded[0].text == QStringLiteral("waves hello"),
+                      "loadFunActions label+text split");
+                CHECK(loaded[1].label == QStringLiteral("Dance") &&
+                          loaded[1].text == QStringLiteral("dances"),
+                      "loadFunActions second entry");
+                CHECK(loaded[2].label == QStringLiteral("NoSeparator") &&
+                          loaded[2].text == QStringLiteral("NoSeparator"),
+                      "loadFunActions no-separator line uses text as label");
+            }
+        } else {
+            CHECK(false, "temp file open");
+        }
+        CHECK(ui::loadFunActions(QStringLiteral("/nonexistent/clint_actions.conf")).isEmpty(),
+              "loadFunActions empty on missing file");
     }
 
     // --- input history (global, dedup + cap) ---

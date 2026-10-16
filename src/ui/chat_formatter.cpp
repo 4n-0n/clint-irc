@@ -3,6 +3,7 @@
 #include "../irc/ctcp.hpp"
 
 #include <QHash>
+#include <QRegularExpression>
 #include <QStringList>
 #include <QTime>
 #include <QUrl>
@@ -107,6 +108,48 @@ QString htmlEscape(const QString& text) {
         default:  out += c; break;
         }
     }
+    return out;
+}
+
+namespace {
+
+// Matches http:// and https:// URLs up to the first whitespace or a character
+// that cannot legally appear in a URL (angle brackets, quotes). Trailing
+// sentence punctuation is trimmed by the caller, not here.
+const QRegularExpression& urlPattern() {
+    static const QRegularExpression re(
+        QStringLiteral("(https?://[^\\s<>\"']+)"),
+        QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
+} // namespace
+
+QString linkify(const QString& text) {
+    QString out;
+    out.reserve(text.size());
+    int last = 0;
+    QRegularExpressionMatchIterator it = urlPattern().globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        const int start = m.capturedStart();
+
+        // Escaped text preceding this URL.
+        out += htmlEscape(text.mid(last, start - last));
+
+        // Drop trailing punctuation that is almost never part of the URL; the
+        // trimmed chars are re-emitted (escaped) in the following segment.
+        QString url = m.captured();
+        while (url.size() > 1 && QStringLiteral(".,;:!?").contains(url.back())) {
+            url.chop(1);
+        }
+
+        out += QStringLiteral(
+                   "<a href=\"%1\" style=\"color:#61afef; text-decoration:underline;\">%2</a>")
+                   .arg(htmlEscape(url), htmlEscape(url));
+        last = start + url.size();
+    }
+    out += htmlEscape(text.mid(last));
     return out;
 }
 
@@ -300,12 +343,12 @@ QString formatChannelLine(const irc::Message& msg, bool highlight) {
         // subtle background under the whole message line.
         QString line;
         if (isNotice) {
-            line = QStringLiteral("-%1- %2").arg(nickSpan(nick), htmlEscape(body));
+            line = QStringLiteral("-%1- %2").arg(nickSpan(nick), linkify(body));
         } else if (highlight) {
             line = QStringLiteral("<span style=\"background-color:#4d2b2b;\">&lt;%1&gt; %2</span>")
-                       .arg(nickHighlightSpan(nick), htmlEscape(body));
+                       .arg(nickHighlightSpan(nick), linkify(body));
         } else {
-            line = QStringLiteral("&lt;%1&gt; %2").arg(nickSpan(nick), htmlEscape(body));
+            line = QStringLiteral("&lt;%1&gt; %2").arg(nickSpan(nick), linkify(body));
         }
         return out + line;
     }
@@ -399,9 +442,9 @@ QString formatQueryLine(const irc::Message& msg) {
         }
 
         if (isNotice) {
-            out += QStringLiteral("-%1- %2").arg(nickSpan(nick), htmlEscape(body));
+            out += QStringLiteral("-%1- %2").arg(nickSpan(nick), linkify(body));
         } else {
-            out += QStringLiteral("&lt;%1&gt; %2").arg(nickSpan(nick), htmlEscape(body));
+            out += QStringLiteral("&lt;%1&gt; %2").arg(nickSpan(nick), linkify(body));
         }
         return out;
     }
@@ -413,7 +456,7 @@ QString formatQueryLine(const irc::Message& msg) {
 QString formatOwnMessage(const QString& nick, const QString& text) {
     return timestampSpan() +
            QStringLiteral("<span style=\"color:#e0e0e0\">&lt;%1&gt;</span> %2")
-               .arg(nickSpan(nick), htmlEscape(text));
+               .arg(nickSpan(nick), linkify(text));
 }
 
 QString formatOwnAction(const QString& nick, const QString& text) {

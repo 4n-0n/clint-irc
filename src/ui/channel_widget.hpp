@@ -39,6 +39,10 @@ signals:
     // clean form (mode prefix stripped); the caller decides the action (the
     // main window opens a query tab).
     void nickActivated(const QString& nick);
+    // Emitted when the user picks an action from a nick's context menu.
+    // `action` is a semantic token ("query", "whois", "kick", "op", ...);
+    // `nick` is the clean nick. The caller resolves it against the tab.
+    void nickContextAction(const QString& action, const QString& nick);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -46,6 +50,8 @@ protected:
 private:
     void setupUi();
     void applyNickFilter();
+    void showNickContextMenu(const QPoint& viewportPos);
+    void showChatContextMenu(const QPoint& globalPos);
 
     Context m_context;
     QString m_title;

@@ -13,6 +13,10 @@ QString nickColor(const QString& nick);
 // Escapes text for safe HTML embedding. Pure function.
 QString htmlEscape(const QString& text);
 
+// Wraps http(s):// URLs in clickable anchors and HTML-escapes everything else.
+// Trailing punctuation (.,;:!?) is kept outside the link. Pure function.
+QString linkify(const QString& text);
+
 // True if `text` mentions `nick` as a whole word (case-insensitive, '_'
 // treated as part of a nick). Used to detect channel highlights. Pure.
 bool containsNick(const QString& text, const QString& nick);

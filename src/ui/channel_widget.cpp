@@ -5,9 +5,15 @@
 
 #include "../irc/prefix.hpp"
 
+#include <QAction>
+#include <QApplication>
+#include <QClipboard>
+#include <QContextMenuEvent>
 #include <QHBoxLayout>
+#include <QDesktopServices>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QTextEdit>
@@ -98,6 +104,11 @@ void ChannelWidget::setupUi() {
                 }
             });
 
+    // Right-clicking a nick opens a context menu of actions.
+    m_nickList->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_nickList, &QListWidget::customContextMenuRequested, this,
+            &ChannelWidget::showNickContextMenu);
+
     setFocusProxy(m_input);
 }
 
@@ -154,19 +165,100 @@ void ChannelWidget::applyNickFilter() {
 }
 
 bool ChannelWidget::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == m_chatView->viewport() && event->type() == QEvent::MouseButtonRelease) {
-        const auto* mouse = static_cast<QMouseEvent*>(event);
-        if (mouse->button() == Qt::LeftButton) {
-            // href is "nick:<percent-encoded nick>".
-            const QString href = m_chatView->anchorAt(mouse->pos());
-            if (href.startsWith(QLatin1String("nick:"))) {
-                m_input->insertTextAtCursor(
-                    QUrl::fromPercentEncoding(href.mid(5).toUtf8()));
-                return true; // consume: a nick click is not a text-selection click
+    if (watched == m_chatView->viewport()) {
+        if (event->type() == QEvent::ContextMenu) {
+            const auto* ctx = static_cast<QContextMenuEvent*>(event);
+            showChatContextMenu(ctx->globalPos());
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton) {
+                // href is "nick:<percent-encoded nick>".
+                const QString href = m_chatView->anchorAt(mouse->pos());
+                if (href.startsWith(QLatin1String("nick:"))) {
+                    m_input->insertTextAtCursor(
+                        QUrl::fromPercentEncoding(href.mid(5).toUtf8()));
+                    return true; // consume: a nick click is not a text-selection click
+                }
+                if (href.startsWith(QLatin1String("http://")) ||
+                    href.startsWith(QLatin1String("https://"))) {
+                    QDesktopServices::openUrl(QUrl(href));
+                    return true;
+                }
             }
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void ChannelWidget::showNickContextMenu(const QPoint& viewportPos) {
+    QListWidgetItem* item = m_nickList->itemAt(viewportPos);
+    if (!item) {
+        return;
+    }
+    const QString nick = item->data(Qt::UserRole).toString();
+    if (nick.isEmpty()) {
+        return;
+    }
+
+    QMenu menu(this);
+    // Each action forwards a semantic token + the clean nick to the caller,
+    // which owns all protocol/state decisions (this widget stays dumb).
+    auto add = [&](const QString& label, const QString& action) {
+        QAction* a = menu.addAction(label);
+        connect(a, &QAction::triggered, this, [this, action, nick] {
+            emit nickContextAction(action, nick);
+        });
+    };
+
+    add(QStringLiteral("Query"), QStringLiteral("query"));
+    menu.addSeparator();
+    add(QStringLiteral("Whois"), QStringLiteral("whois"));
+    add(QStringLiteral("CTCP Version"), QStringLiteral("ctcp-version"));
+    add(QStringLiteral("CTCP Ping"), QStringLiteral("ctcp-ping"));
+    add(QStringLiteral("CTCP Time"), QStringLiteral("ctcp-time"));
+    menu.addSeparator();
+    add(QStringLiteral("Kick"), QStringLiteral("kick"));
+    add(QStringLiteral("Op (+o)"), QStringLiteral("op"));
+    add(QStringLiteral("Deop (-o)"), QStringLiteral("deop"));
+    add(QStringLiteral("Voice (+v)"), QStringLiteral("voice"));
+    add(QStringLiteral("Devoice (-v)"), QStringLiteral("devoice"));
+
+    menu.exec(m_nickList->viewport()->mapToGlobal(viewportPos));
+}
+
+void ChannelWidget::showChatContextMenu(const QPoint& globalPos) {
+    // Resolve the anchor under the cursor (viewport coords).
+    const QPoint vp = m_chatView->viewport()->mapFromGlobal(globalPos);
+    const QString href = m_chatView->anchorAt(vp);
+    const bool isLink =
+        href.startsWith(QLatin1String("http://")) || href.startsWith(QLatin1String("https://"));
+
+    QMenu menu(this);
+
+    QAction* copy = menu.addAction(QStringLiteral("Copy"));
+    copy->setEnabled(m_chatView->textCursor().hasSelection());
+    connect(copy, &QAction::triggered, m_chatView, &QTextEdit::copy);
+
+    if (isLink) {
+        QAction* open = menu.addAction(QStringLiteral("Open Link"));
+        connect(open, &QAction::triggered, this, [href] {
+            QDesktopServices::openUrl(QUrl(href));
+        });
+        QAction* copyLink = menu.addAction(QStringLiteral("Copy Link"));
+        connect(copyLink, &QAction::triggered, this, [href] {
+            QApplication::clipboard()->setText(href);
+        });
+    }
+
+    menu.addSeparator();
+    QAction* selectAll = menu.addAction(QStringLiteral("Select All"));
+    connect(selectAll, &QAction::triggered, m_chatView, &QTextEdit::selectAll);
+    QAction* clearAction = menu.addAction(QStringLiteral("Clear"));
+    connect(clearAction, &QAction::triggered, m_chatView, &QTextEdit::clear);
+
+    menu.exec(globalPos);
 }
 
 } // namespace ui

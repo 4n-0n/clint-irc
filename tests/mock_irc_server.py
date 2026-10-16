@@ -6,12 +6,18 @@ mock_server.log), and drives a registration handshake:
   NICK/USER -> 001 welcome + PING
   PONG      -> (logged, no reply)
   JOIN      -> 353 NAMES + 366 END OF NAMES
+
+Also implements IRCv3 SASL PLAIN when the client negotiates it:
+  CAP LS 302       -> CAP * LS :sasl multi-prefix
+  CAP REQ :sasl    -> CAP * ACK :sasl
+  AUTHENTICATE PLAIN -> AUTHENTICATE +
+  AUTHENTICATE <b64> -> 903 RPL_SASLSUCCESS (payload decoded + logged)
+  CAP END          -> (no reply)
 """
+import base64
 import os
 import socket
 import sys
-import threading
-import time
 
 HOST = "127.0.0.1"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6667
@@ -62,6 +68,23 @@ def main():
                     saw_user = True
                 elif cmd == "PONG":
                     pass
+                elif cmd == "CAP":
+                    sub = parts[1].upper() if len(parts) > 1 else ""
+                    if sub == "LS":
+                        send(conn, ":srv CAP * LS :sasl multi-prefix")
+                    elif sub == "REQ":
+                        send(conn, ":srv CAP * ACK :sasl")
+                    # CAP END -> no reply
+                elif cmd == "AUTHENTICATE":
+                    if len(parts) > 1 and parts[1] == "PLAIN":
+                        send(conn, "AUTHENTICATE +")
+                    elif len(parts) > 1:
+                        try:
+                            decoded = base64.b64decode(parts[1])
+                            log(f"    sasl payload: {decoded!r}")
+                        except Exception as e:  # noqa: BLE001
+                            log(f"    sasl decode error: {e}")
+                        send(conn, ":srv 903 * :SASL authentication successful")
                 elif cmd == "JOIN":
                     chan = parts[1] if len(parts) > 1 else ""
                     send(conn, f":srv 353 {nick} = {chan} :{nick} @opnick +voice")

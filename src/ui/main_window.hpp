@@ -3,12 +3,14 @@
 #include "../irc/connection.hpp"
 
 #include "channel_widget.hpp"
+#include "fun_actions.hpp"
 #include "input_history.hpp"
 
 #include <QHash>
 #include <QMainWindow>
 
 class QAction;
+class QMenu;
 class QTabWidget;
 
 namespace app { class ClientController; }
@@ -51,6 +53,14 @@ private:
     void onDisconnectAction();
     void onAboutAction();
 
+    // Builds the fun /me actions menu from the loaded config (or defaults).
+    QMenu* buildFunMenu(QWidget* parent);
+    // Sends a fun /me action to the current channel/query tab.
+    void onFunAction(const QString& text);
+
+    // Nick context-menu dispatch (from ChannelWidget::nickContextAction).
+    void onNickContextAction(const QString& action, const QString& nick);
+
     // Tab management.
     ChannelWidget* findOrCreateTab(ChannelWidget::Context ctx, const QString& title,
                                    const QString& key);
@@ -75,6 +85,7 @@ private:
     QHash<QString, ChannelWidget*> m_tabIndex; // lowercase key -> tab
     QAction* m_connectAction = nullptr;
     QAction* m_disconnectAction = nullptr;
+    QList<FunAction> m_funActions; // fun /me actions (config or defaults)
     InputHistory m_history; // global command history, shared across all tabs
 };
 

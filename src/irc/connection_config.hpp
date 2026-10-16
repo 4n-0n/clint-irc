@@ -15,6 +15,8 @@ struct ConnectionConfig {
     QString user;        // empty -> fall back to nick
     QString realName;
     QString password;    // optional server password (PASS)
+    QString saslUser;    // SASL PLAIN auth identity; empty -> no SASL
+    QString saslPassword;// SASL PLAIN password (only used when saslUser set)
     QStringList autoJoinChannels; // e.g. "#chan1", "#chan2"
 
     // Username to send in the USER command; defaults to nick when unset.

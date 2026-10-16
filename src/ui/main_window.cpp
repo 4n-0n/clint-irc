@@ -4,14 +4,19 @@
 #include "../irc/connection_config.hpp"
 #include "chat_formatter.hpp"
 #include "connect_dialog.hpp"
+#include "fun_actions.hpp"
 
 #include <QCloseEvent>
 #include <QApplication>
 #include <QDialog>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QToolBar>
+#include <QToolButton>
 
 namespace {
 
@@ -78,6 +83,15 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::setupMenus() {
+    // Load the fun /me actions: config file first, built-in defaults as fallback.
+    const QString configDir =
+        QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) +
+        QStringLiteral("/clint");
+    m_funActions = loadFunActions(configDir + QStringLiteral("/actions.conf"));
+    if (m_funActions.isEmpty()) {
+        m_funActions = defaultFunActions();
+    }
+
     QMenu* fileMenu = menuBar()->addMenu(QStringLiteral("&File"));
     m_connectAction = fileMenu->addAction(QStringLiteral("&Connect..."), this, &MainWindow::onConnectAction);
     m_disconnectAction = fileMenu->addAction(QStringLiteral("&Disconnect"), this, &MainWindow::onDisconnectAction);
@@ -85,8 +99,25 @@ void MainWindow::setupMenus() {
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("&Quit"), this, &QWidget::close);
 
+    // Fun /me actions menu (also surfaced as a toolbar "Fun" button).
+    menuBar()->addMenu(buildFunMenu(this));
+
     QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
     helpMenu->addAction(QStringLiteral("&About"), this, &MainWindow::onAboutAction);
+
+    // Toolbar: quick access to connect/disconnect and the fun actions.
+    QToolBar* toolbar = addToolBar(QStringLiteral("Main"));
+    toolbar->setObjectName(QStringLiteral("mainToolbar"));
+    toolbar->setMovable(false);
+    toolbar->addAction(m_connectAction);
+    toolbar->addAction(m_disconnectAction);
+    toolbar->addSeparator();
+    auto* funButton = new QToolButton(toolbar);
+    funButton->setText(QStringLiteral("Fun"));
+    funButton->setToolTip(QStringLiteral("Send a /me action"));
+    funButton->setPopupMode(QToolButton::InstantPopup);
+    funButton->setMenu(buildFunMenu(funButton));
+    toolbar->addWidget(funButton);
 }
 
 void MainWindow::wireController() {
@@ -253,6 +284,57 @@ void MainWindow::onAboutAction() {
                        "A minimal IRC client built with C++17 and Qt6."));
 }
 
+QMenu* MainWindow::buildFunMenu(QWidget* parent) {
+    auto* menu = new QMenu(QStringLiteral("&Actions"), parent);
+    for (const FunAction& a : m_funActions) {
+        QAction* act = menu->addAction(a.label);
+        connect(act, &QAction::triggered, this, [this, text = a.text] { onFunAction(text); });
+    }
+    return menu;
+}
+
+void MainWindow::onFunAction(const QString& text) {
+    auto* tab = qobject_cast<ChannelWidget*>(m_tabs->currentWidget());
+    if (!tab) {
+        return;
+    }
+    if (tab->context() != ChannelWidget::Context::Channel &&
+        tab->context() != ChannelWidget::Context::Query) {
+        appendToServer(formatSystem(QStringLiteral("Join a channel or open a query first.")));
+        return;
+    }
+    m_controller->sendAction(tab->title(), text);
+    tab->appendHtml(formatOwnAction(m_controller->nick(), text));
+}
+
+void MainWindow::onNickContextAction(const QString& action, const QString& nick) {
+    // Resolve the originating tab (a channel tab owns the nick list).
+    auto* tab = qobject_cast<ChannelWidget*>(sender());
+    const QString channel = tab ? tab->title() : QString();
+
+    if (action == QLatin1String("query")) {
+        openQueryForNick(nick);
+    } else if (action == QLatin1String("whois")) {
+        m_controller->sendCommand(QStringLiteral("WHOIS"), {nick});
+    } else if (action == QLatin1String("ctcp-version")) {
+        m_controller->sendCtcp(nick, QStringLiteral("VERSION"));
+    } else if (action == QLatin1String("ctcp-ping")) {
+        m_controller->sendCtcp(nick, QStringLiteral("PING"));
+    } else if (action == QLatin1String("ctcp-time")) {
+        m_controller->sendCtcp(nick, QStringLiteral("TIME"));
+    } else if (action == QLatin1String("kick")) {
+        m_controller->sendCommand(QStringLiteral("KICK"), {channel, nick});
+    } else if (action == QLatin1String("op")) {
+        m_controller->sendCommand(QStringLiteral("MODE"), {channel, QStringLiteral("+o"), nick});
+    } else if (action == QLatin1String("deop")) {
+        m_controller->sendCommand(QStringLiteral("MODE"), {channel, QStringLiteral("-o"), nick});
+    } else if (action == QLatin1String("voice")) {
+        m_controller->sendCommand(QStringLiteral("MODE"), {channel, QStringLiteral("+v"), nick});
+    } else if (action == QLatin1String("devoice")) {
+        m_controller->sendCommand(QStringLiteral("MODE"), {channel, QStringLiteral("-v"), nick});
+    }
+}
+
 // ---- Tab management ------------------------------------------------------
 
 ChannelWidget* MainWindow::findOrCreateTab(ChannelWidget::Context ctx,
@@ -268,6 +350,7 @@ ChannelWidget* MainWindow::findOrCreateTab(ChannelWidget::Context ctx,
         onInput(tab, text);
     });
     connect(tab, &ChannelWidget::nickActivated, this, &MainWindow::openQueryForNick);
+    connect(tab, &ChannelWidget::nickContextAction, this, &MainWindow::onNickContextAction);
     m_tabs->setCurrentWidget(tab);
     return tab;
 }

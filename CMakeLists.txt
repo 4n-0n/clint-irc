@@ -20,6 +20,7 @@ set(UI_SOURCES
     src/ui/chat_formatter.cpp
     src/ui/channel_widget.cpp
     src/ui/connect_dialog.cpp
+    src/ui/fun_actions.cpp
     src/ui/history_line_edit.cpp
     src/ui/main_window.cpp
 )
@@ -42,6 +43,7 @@ set(HEADERS
     src/ui/channel_widget.hpp
     src/ui/completion.hpp
     src/ui/connect_dialog.hpp
+    src/ui/fun_actions.hpp
     src/ui/history_line_edit.hpp
     src/ui/input_history.hpp
     src/ui/main_window.hpp
@@ -65,6 +67,7 @@ add_executable(clint_selftest
     src/irc/encoder.cpp
     src/irc/ctcp.cpp
     src/ui/chat_formatter.cpp
+    src/ui/fun_actions.cpp
 )
 
 target_include_directories(clint_selftest PRIVATE src)

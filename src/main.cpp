@@ -30,6 +30,12 @@ int main(int argc, char** argv) {
     QCommandLineOption channelOpt(QStringList{"c", "channel"},
                                   QStringLiteral("Auto-join channel (repeatable)"),
                                   QStringLiteral("channel"));
+    QCommandLineOption saslUserOpt(QStringList{"sasl-user"},
+                                   QStringLiteral("SASL PLAIN auth identity"),
+                                   QStringLiteral("user"));
+    QCommandLineOption saslPassOpt(QStringList{"sasl-password"},
+                                   QStringLiteral("SASL PLAIN password"),
+                                   QStringLiteral("password"));
     QCommandLineOption listOpt(QStringList{"list"},
                                QStringLiteral("Request the channel list after connecting"));
     QCommandLineOption quitAfterOpt(QStringList{"quit-after"},
@@ -40,6 +46,8 @@ int main(int argc, char** argv) {
     parser.addOption(tlsOpt);
     parser.addOption(nickOpt);
     parser.addOption(channelOpt);
+    parser.addOption(saslUserOpt);
+    parser.addOption(saslPassOpt);
     parser.addOption(listOpt);
     parser.addOption(quitAfterOpt);
     parser.process(app);
@@ -66,6 +74,8 @@ int main(int argc, char** argv) {
         cfg.useTls = parser.isSet(tlsOpt);
         cfg.nick = parser.value(nickOpt);
         cfg.realName = cfg.nick;
+        cfg.saslUser = parser.value(saslUserOpt);
+        cfg.saslPassword = parser.value(saslPassOpt);
         cfg.autoJoinChannels = parser.values(channelOpt);
         controller.connectToServer(cfg);
     }

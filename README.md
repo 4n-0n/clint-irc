@@ -4,8 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A small IRC client with a Qt Widgets GUI, TLS support, colored chat, per-channel
-tabs, nick lists, nick-mention highlighting with tab activity markers, and CTCP
-ACTION/version handling.
+tabs, nick lists, nick-mention highlighting with tab activity markers, clickable
+URLs, SASL PLAIN authentication, right-click context menus, configurable /me
+actions, and CTCP ACTION/version handling.
 
 ## Build
 
@@ -26,13 +27,35 @@ Or connect directly from the command line:
 ./build/clint --server irc.libera.chat --port 6697 --tls --nick mynick --channel '#chan'
 ```
 
+With SASL PLAIN authentication:
+
+```sh
+./build/clint --server irc.libera.chat --port 6697 --tls --nick mynick \
+  --sasl-user myaccount --sasl-password secret --channel '#chan'
+```
+
 ## Test
 
 ```sh
 ./build/clint_selftest
 ```
 
-Runs pure-function tests for the IRC parser, encoder, CTCP, and HTML formatter.
+Runs pure-function tests for the IRC parser, encoder, CTCP, HTML formatter,
+and fun-actions loader.
+
+## Fun /me actions
+
+The "Actions" menu (and toolbar "Fun" button) sends preconfigured `/me`
+actions. The list is read from `~/.config/clint/actions.conf` (falling back to
+built-in defaults when missing). Format — one action per line, `Label | text`:
+
+```
+Wave | waves hello
+Dance | does a happy dance
+```
+
+`#` starts a comment; a line without `|` uses the whole line as label and text.
+See `examples/actions.conf` for a full example.
 
 ## Architecture
 

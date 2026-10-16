@@ -30,6 +30,8 @@ private:
     QLineEdit* m_user;
     QLineEdit* m_realName;
     QLineEdit* m_password;
+    QLineEdit* m_saslUser;
+    QLineEdit* m_saslPassword;
     QLineEdit* m_channels;
 };
 
