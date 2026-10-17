@@ -5,8 +5,9 @@
 
 A small IRC client with a Qt Widgets GUI, TLS support, colored chat, per-channel
 tabs, nick lists, nick-mention highlighting with tab activity markers, clickable
-URLs, SASL PLAIN authentication, right-click context menus, configurable /me
-actions, and CTCP ACTION/version handling.
+URLs, click-to-mention and double-click-to-query nicks in the chat view, SASL
+PLAIN authentication, right-click context menus, configurable /me actions, and
+CTCP ACTION/version handling.
 
 ## Build
 

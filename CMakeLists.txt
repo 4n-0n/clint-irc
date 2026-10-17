@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(clint_irc VERSION 0.1.0 LANGUAGES CXX)
+project(clint_irc VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -89,8 +89,31 @@ add_executable(clint_completion_test
 target_include_directories(clint_completion_test PRIVATE src)
 target_link_libraries(clint_completion_test PRIVATE Qt6::Core Qt6::Widgets)
 
+# Chat-view click semantics test: single click inserts a nick, double click
+# emits nickActivated (needs Qt Widgets; runs offscreen).
+add_executable(clint_nick_click_test
+    tests/test_nick_click.cpp
+    src/ui/channel_widget.cpp
+    src/ui/history_line_edit.cpp
+)
+target_include_directories(clint_nick_click_test PRIVATE src)
+target_link_libraries(clint_nick_click_test PRIVATE Qt6::Core Qt6::Widgets)
+
+# Nick-list rebuild test: the selected nick and the scroll position survive the
+# full rebuild that every join/part/quit triggers (needs Qt Widgets; offscreen).
+add_executable(clint_nick_list_test
+    tests/test_nick_list_scroll.cpp
+    src/ui/channel_widget.cpp
+    src/ui/history_line_edit.cpp
+)
+target_include_directories(clint_nick_list_test PRIVATE src)
+target_link_libraries(clint_nick_list_test PRIVATE Qt6::Core Qt6::Widgets)
+
 enable_testing()
 add_test(NAME clint_selftest COMMAND clint_selftest)
 add_test(NAME clint_settings_test COMMAND clint_settings_test)
 add_test(NAME clint_completion_test COMMAND clint_completion_test)
-set_tests_properties(clint_settings_test clint_completion_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME clint_nick_click_test COMMAND clint_nick_click_test)
+add_test(NAME clint_nick_list_test COMMAND clint_nick_list_test)
+set_tests_properties(clint_settings_test clint_completion_test clint_nick_click_test
+    clint_nick_list_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

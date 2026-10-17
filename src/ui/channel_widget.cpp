@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QTextEdit>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -88,10 +89,25 @@ void ChannelWidget::setupUi() {
         }
     });
 
-    // Clicking a nick in the chat view inserts it into the input at the cursor.
-    // Mouse events land on the viewport (not the scroll area), so the filter is
-    // installed there; anchorAt() resolves which link (if any) was clicked.
+    // Clicking a nick in the chat view inserts it into the input at the cursor;
+    // double-clicking it opens a query. Mouse events land on the viewport (not
+    // the scroll area), so the filter is installed there; anchorAt() resolves
+    // which link (if any) was clicked.
     m_chatView->viewport()->installEventFilter(this);
+
+    // Deferred single-click insert: armed on release, cancelled by a dblclick.
+    // The interval matches Qt's own double-click detection window so a click
+    // that Qt will promote to a double click never inserts the nick first.
+    m_nickClickTimer = new QTimer(this);
+    m_nickClickTimer->setSingleShot(true);
+    m_nickClickTimer->setInterval(QApplication::doubleClickInterval());
+    connect(m_nickClickTimer, &QTimer::timeout, this, [this] {
+        const QString nick = m_pendingNick;
+        m_pendingNick.clear();
+        if (!nick.isEmpty()) {
+            m_input->insertTextAtCursor(nick);
+        }
+    });
 
     connect(m_nickFilter, &QLineEdit::textChanged, this, &ChannelWidget::applyNickFilter);
 
@@ -150,7 +166,16 @@ void ChannelWidget::applyNickFilter() {
                                  ? m_nickList->currentItem()->data(Qt::UserRole).toString()
                                  : QString();
 
+    // Preserve the scroll position too. clear() + re-add (and setCurrentItem,
+    // which scrolls to its item) both reset the viewport to the top, which made
+    // the list jump on every join/part/message. Restoring the value afterwards
+    // keeps the user's place; the rebuild may only shorten the range, so the
+    // value is re-clamped.
+    QScrollBar* bar = m_nickList->verticalScrollBar();
+    const int scroll = bar->value();
+
     m_nickList->clear();
+    QListWidgetItem* selectedItem = nullptr;
     for (int i = 0; i < m_nicks.size(); ++i) {
         const QString& nick = m_nicks.at(i);
         if (needle.isEmpty() || nick.contains(needle, Qt::CaseInsensitive)) {
@@ -158,10 +183,61 @@ void ChannelWidget::applyNickFilter() {
             item->setData(Qt::UserRole, m_cleanNicks.at(i));
             m_nickList->addItem(item);
             if (!selected.isEmpty() && m_cleanNicks.at(i) == selected) {
-                m_nickList->setCurrentItem(item);
+                selectedItem = item;
             }
         }
     }
+    if (selectedItem) {
+        m_nickList->setCurrentItem(selectedItem); // may scroll; undone below
+    }
+    bar->setValue(qMin(scroll, bar->maximum()));
+}
+
+QString ChannelWidget::nickAt(const QPoint& viewportPos) const {
+    // Nick anchors carry the custom "nick:<percent-encoded>" scheme.
+    const QString href = m_chatView->anchorAt(viewportPos);
+    if (!href.startsWith(QLatin1String("nick:"))) {
+        return {};
+    }
+    return QUrl::fromPercentEncoding(href.mid(5).toUtf8());
+}
+
+bool ChannelWidget::onChatMouseRelease(const QPoint& viewportPos) {
+    // The release that closes a double-click pair must not re-arm the pending
+    // insert (Qt sends press/release/dblclick/release). The timestamp is checked
+    // instead of a flag so it can never stay armed if the trailing release is
+    // swallowed elsewhere (e.g. the tab switched away on the dblclick).
+    if (m_nickDblClick.isValid() &&
+        m_nickDblClick.elapsed() < QApplication::doubleClickInterval()) {
+        return true;
+    }
+
+    const QString nick = nickAt(viewportPos);
+    if (!nick.isEmpty()) {
+        m_pendingNick = nick;
+        m_nickClickTimer->start();
+        return true;
+    }
+
+    const QString href = m_chatView->anchorAt(viewportPos);
+    if (href.startsWith(QLatin1String("http://")) || href.startsWith(QLatin1String("https://"))) {
+        QDesktopServices::openUrl(QUrl(href));
+        return true;
+    }
+    return false; // plain text: not ours
+}
+
+bool ChannelWidget::onChatMouseDoubleClick(const QPoint& viewportPos) {
+    const QString nick = nickAt(viewportPos);
+    if (nick.isEmpty()) {
+        return false; // plain text: let QTextEdit select the word as usual
+    }
+    // A double click supersedes the single-click insert that is still pending.
+    m_nickClickTimer->stop();
+    m_pendingNick.clear();
+    m_nickDblClick.start();
+    emit nickActivated(nick);
+    return true;
 }
 
 bool ChannelWidget::eventFilter(QObject* watched, QEvent* event) {
@@ -173,19 +249,14 @@ bool ChannelWidget::eventFilter(QObject* watched, QEvent* event) {
         }
         if (event->type() == QEvent::MouseButtonRelease) {
             const auto* mouse = static_cast<QMouseEvent*>(event);
-            if (mouse->button() == Qt::LeftButton) {
-                // href is "nick:<percent-encoded nick>".
-                const QString href = m_chatView->anchorAt(mouse->pos());
-                if (href.startsWith(QLatin1String("nick:"))) {
-                    m_input->insertTextAtCursor(
-                        QUrl::fromPercentEncoding(href.mid(5).toUtf8()));
-                    return true; // consume: a nick click is not a text-selection click
-                }
-                if (href.startsWith(QLatin1String("http://")) ||
-                    href.startsWith(QLatin1String("https://"))) {
-                    QDesktopServices::openUrl(QUrl(href));
-                    return true;
-                }
+            if (mouse->button() == Qt::LeftButton && onChatMouseRelease(mouse->pos())) {
+                return true; // consumed: nick/link click, or a double-click tail
+            }
+        }
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton && onChatMouseDoubleClick(mouse->pos())) {
+                return true; // consumed: the word must not be selected as well
             }
         }
     }
