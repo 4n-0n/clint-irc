@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("clint"));
     QApplication::setApplicationName(QStringLiteral("clint"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("clint - a minimal IRC client"));

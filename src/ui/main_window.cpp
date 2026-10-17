@@ -280,7 +280,7 @@ void MainWindow::onDisconnectAction() {
 
 void MainWindow::onAboutAction() {
     QMessageBox::about(this, QStringLiteral("About clint"),
-        QStringLiteral("<b>clint</b> 0.1.0<br>"
+        QStringLiteral("<b>clint</b> 0.2.0<br>"
                        "A minimal IRC client built with C++17 and Qt6."));
 }
 

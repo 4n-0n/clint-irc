@@ -292,7 +292,7 @@ bool ClientController::handleCtcpRequest(const irc::Message& msg) {
     const QString from = QString::fromUtf8(msg.prefix.nick);
 
     if (tag == QStringLiteral("VERSION")) {
-        sendNotice(from, QString::fromUtf8(irc::ctcp::encode("VERSION", "clint 0.1.0")));
+        sendNotice(from, QString::fromUtf8(irc::ctcp::encode("VERSION", "clint 0.2.0")));
     } else if (tag == QStringLiteral("PING")) {
         sendNotice(from, QString::fromUtf8(irc::ctcp::encode("PING", parsed.argument)));
     } else if (tag == QStringLiteral("TIME")) {
