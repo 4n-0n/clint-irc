@@ -13,7 +13,7 @@ struct Prefix {
     QByteArray host;
 };
 
-// An IRC protocol message (RFC 1459 / RFC 2812).
+// An IRC protocol message (RFC 1459 / RFC 2812, IRCv3 message tags).
 //
 // Invariants:
 //  - `raw` is the exact line received, WITHOUT the trailing CRLF.
@@ -21,7 +21,8 @@ struct Prefix {
 //  - `params` are the already-split parameters; trailing ':' semantics are
 //    re-applied by the encoder (see encoder.hpp), not stored here.
 struct Message {
-    QByteArray raw;        // full original line (no CRLF)
+    QByteArray raw;        // full original line (no CRLF), tags included
+    QByteArray tagsRaw;    // IRCv3 tags without the leading '@' or empty
     QByteArray prefixRaw;  // "nick!user@host" or empty
     Prefix prefix;         // parsed prefix (all-empty when absent)
     QByteArray command;    // "PRIVMSG", "001", "PING", ...

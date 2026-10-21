@@ -31,7 +31,8 @@ public:
     void sendAction(const QString& target, const QString& text);
     void sendNotice(const QString& target, const QString& text);
     void sendCtcp(const QString& target, const QString& tag, const QString& argument = QString());
-    void joinChannel(const QString& channel);
+    // `key` is the channel key (+k); sent only when non-empty.
+    void joinChannel(const QString& channel, const QString& key = QString());
     void partChannel(const QString& channel, const QString& reason = QString());
     void setNick(const QString& nick);
     void setTopic(const QString& channel, const QString& topic);
@@ -46,6 +47,9 @@ public:
 
 signals:
     void stateChanged(irc::ConnectionState state);
+    // Transport up; `peer` is the resolved remote endpoint ("[::1]:6697"). Lets
+    // the UI show which address an IPv6-only (or dual-stack) host reached.
+    void transportConnected(const QString& peer);
     void serverMessage(const QString& html);
     void channelMessage(const QString& channel, const QString& html);
     void queryMessage(const QString& peer, const QString& html);
@@ -55,6 +59,9 @@ signals:
     void channelHighlighted(const QString& channel);
     void channelJoined(const QString& channel);
     void channelParted(const QString& channel);
+    // Topic of a channel: set on join (332), changed by TOPIC, cleared by 331
+    // or by leaving. The UI shows it above the chat instead of as a chat line.
+    void channelTopicChanged(const QString& channel, const QString& topic);
     void nickListChanged(const QString& channel, const QStringList& nicks);
     void ownNickChanged(const QString& nick);
     void errorOccurred(const QString& message);
@@ -72,6 +79,7 @@ private:
 
     struct ChannelState {
         QString displayName;
+        QString topic;
         QList<NickEntry> nicks; // sorted by nick (case-insensitive)
     };
 
@@ -89,6 +97,11 @@ private:
     void handleNick(const irc::Message& msg);
     void handleMode(const irc::Message& msg);
     void handleTopic(const irc::Message& msg);
+    // Applies a MODE line's prefix changes (+o/-o/+v/-v, ...) to the channel's
+    // nick list. Returns true when at least one nick's prefix changed.
+    bool applyChannelModes(const QString& key, const QByteArray& modes,
+                           const QList<QByteArray>& args);
+    void setChannelTopic(const QString& key, const QString& topic);
 
     // Returns true if the body was a CTCP request we replied to (and displayed).
     bool handleCtcpRequest(const irc::Message& msg);
@@ -103,7 +116,9 @@ private:
     irc::IrcConnection m_conn;
     QString m_nick;
     QHash<QString, ChannelState> m_channels; // key (lowercase) -> state
-    QString m_prefixSymbols = QStringLiteral("@+"); // ISUPPORT PREFIX (RFC default)
+    QString m_prefixSymbols = QStringLiteral("@+"); // ISUPPORT PREFIX symbols
+    QString m_prefixModes = QStringLiteral("ov");   // ISUPPORT PREFIX letters
+    int m_nickRetries = 0; // automatic nick suffixes sent during registration
     int m_listCount = 0;
 };
 

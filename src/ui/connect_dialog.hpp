@@ -5,6 +5,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QLineEdit;
 class QSpinBox;
 
@@ -26,6 +27,7 @@ private:
     QLineEdit* m_host;
     QSpinBox* m_port;
     QCheckBox* m_tls;
+    QComboBox* m_family;
     QLineEdit* m_nick;
     QLineEdit* m_user;
     QLineEdit* m_realName;

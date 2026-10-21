@@ -1,10 +1,13 @@
 #include "connection.hpp"
 
+#include <QHostAddress>
+#include <QHostInfo>
 #include <QSslSocket>
 #include <QStringList>
 #include <QTimer>
 
 #include "encoder.hpp"
+#include "endpoint.hpp"
 #include "parser.hpp"
 
 namespace irc {
@@ -20,6 +23,11 @@ QAbstractSocket* defaultSocketFactory() {
 // How long to wait for a CAP * LS reply before abandoning SASL negotiation
 // and registering plainly. Guards against servers that ignore CAP LS.
 constexpr int kSaslTimeoutMs = 5000;
+
+// Per-address budget for TCP connect + TLS handshake. Without it a stale or
+// firewalled record (a dead IPv4 next to a working IPv6 one, typically) would
+// keep the whole connect stalled in the kernel's SYN retries.
+constexpr int kConnectTimeoutMs = 15000;
 
 bool isNumericCommand(const QByteArray& command) {
     if (command.size() != 3) {
@@ -48,6 +56,45 @@ bool capListContains(const QByteArray& list, const QByteArray& cap) {
     return false;
 }
 
+// Effective family of a resolved address. IPv4-mapped IPv6 addresses
+// ("::ffff:192.0.2.1") are IPv4 for every practical purpose, including
+// family filtering, since that is how a v4 host may come back from getaddrinfo.
+QAbstractSocket::NetworkLayerProtocol transportFamily(const QHostAddress& address) {
+    if (address.protocol() == QAbstractSocket::IPv6Protocol &&
+        address.toString().startsWith(QLatin1String("::ffff:"))) {
+        return QAbstractSocket::IPv4Protocol;
+    }
+    return address.protocol();
+}
+
+bool addressMatchesFamily(const QHostAddress& address, AddressFamily family) {
+    const auto protocol = transportFamily(address);
+    switch (family) {
+    case AddressFamily::IPv4:
+        return protocol == QAbstractSocket::IPv4Protocol;
+    case AddressFamily::IPv6:
+        return protocol == QAbstractSocket::IPv6Protocol;
+    case AddressFamily::Any:
+        break;
+    }
+    return protocol == QAbstractSocket::IPv4Protocol ||
+           protocol == QAbstractSocket::IPv6Protocol;
+}
+
+QString describeAddress(const QHostAddress& address, quint16 port) {
+    QHostAddress shown = address;
+    if (transportFamily(address) == QAbstractSocket::IPv4Protocol &&
+        address.protocol() == QAbstractSocket::IPv6Protocol) {
+        // Show a v4-mapped address as plain IPv4.
+        const QString text = address.toString();
+        QHostAddress plain;
+        if (plain.setAddress(text.mid(7))) {
+            shown = plain;
+        }
+    }
+    return formatEndpoint(shown.toString(), port);
+}
+
 } // namespace
 
 IrcConnection::IrcConnection(QObject* parent)
@@ -60,22 +107,138 @@ IrcConnection::IrcConnection(SocketFactory factory, QObject* parent)
     m_saslTimer = new QTimer(this);
     m_saslTimer->setSingleShot(true);
     connect(m_saslTimer, &QTimer::timeout, this, [this] { finishSasl(); });
+
+    m_attemptTimer = new QTimer(this);
+    m_attemptTimer->setSingleShot(true);
+    connect(m_attemptTimer, &QTimer::timeout, this, &IrcConnection::onAttemptTimeout);
 }
 
 void IrcConnection::connectToServer(const ConnectionConfig& config) {
-    // Drop any prior socket; detach its signals so no stale callbacks fire.
-    if (m_socket) {
-        m_socket->disconnect(this);
-        m_socket->deleteLater();
-        m_socket = nullptr;
-    }
-    m_buffer.clear();
-    m_config = config;
-    m_saslState = SaslState::Disabled;
-    m_saslTimer->stop();
+    teardown();
     setState(ConnectionState::Disconnected); // normalize baseline
 
+    // Accept "host", "host:port", "[v6]", "[v6]:port" and bare v6 literals, so
+    // a server string can be pasted straight in. An explicit port in the host
+    // string wins over the separate port field.
+    const Endpoint endpoint = parseEndpoint(config.host);
+    if (endpoint.host.isEmpty()) {
+        emit errorOccurred(QStringLiteral("No server host given."));
+        return;
+    }
+
+    m_config = config;
+    m_config.host = endpoint.host;
+    if (endpoint.port != 0) {
+        m_config.port = endpoint.port;
+    }
+
+    m_saslState = SaslState::Disabled;
+    m_failedAttempts.clear();
+    m_peerEndpoint.clear();
+    setState(ConnectionState::Connecting);
+    startResolution();
+}
+
+void IrcConnection::teardown() {
+    ++m_generation; // any in-flight lookup callback is now stale
+    if (m_lookupId != -1) {
+        QHostInfo::abortHostLookup(m_lookupId);
+        m_lookupId = -1;
+    }
+    m_attemptTimer->stop();
+    m_saslTimer->stop();
+    dropSocket();
+    m_buffer.clear();
+    m_addresses.clear();
+    m_addressIndex = 0;
+    m_currentAttempt.clear();
+    m_peerEndpoint.clear();
+    m_saslState = SaslState::Disabled;
+}
+
+void IrcConnection::dropSocket() {
+    if (!m_socket) {
+        return;
+    }
+    m_socket->disconnect(this);
+    m_socket->abort();
+    m_socket->deleteLater();
+    m_socket = nullptr;
+}
+
+void IrcConnection::startResolution() {
+    QHostAddress literal;
+    if (literal.setAddress(m_config.host)) {
+        // No DNS for literal addresses: go straight to the connect attempt.
+        if (!addressMatchesFamily(literal, m_config.family)) {
+            failConnect(QStringLiteral("%1 is not an %2 address.")
+                            .arg(m_config.host, addressFamilyLabel(m_config.family)));
+            return;
+        }
+        m_addresses = {literal};
+        m_addressIndex = 0;
+        tryNextAddress();
+        return;
+    }
+
+    const quint64 generation = m_generation;
+    m_lookupId = QHostInfo::lookupHost(m_config.host, this, [this, generation](
+                                                                  const QHostInfo& info) {
+        if (generation != m_generation) {
+            return; // superseded by a newer connect/teardown
+        }
+        m_lookupId = -1;
+        onLookupFinished(info);
+    });
+}
+
+void IrcConnection::onLookupFinished(const QHostInfo& info) {
+    if (info.error() != QHostInfo::NoError) {
+        failConnect(QStringLiteral("Cannot resolve %1: %2")
+                        .arg(m_config.host, info.errorString()));
+        return;
+    }
+
+    QList<QHostAddress> usable;
+    for (const QHostAddress& address : info.addresses()) {
+        if (addressMatchesFamily(address, m_config.family)) {
+            usable << address;
+        }
+    }
+
+    if (usable.isEmpty()) {
+        failConnect(QStringLiteral("%1 has no %2 address.")
+                        .arg(m_config.host, addressFamilyLabel(m_config.family)));
+        return;
+    }
+
+    // Keep the resolver's order: getaddrinfo is already sorted by destination
+    // preference (RFC 6724), which puts IPv6 first on a dual-stack host.
+    m_addresses = usable;
+    m_addressIndex = 0;
+    tryNextAddress();
+}
+
+void IrcConnection::tryNextAddress() {
+    if (m_addressIndex >= m_addresses.size()) {
+        const QString tried = m_failedAttempts.isEmpty()
+                                  ? QStringLiteral("no address available")
+                                  : m_failedAttempts.join(QStringLiteral("; "));
+        failConnect(QStringLiteral("Could not connect to %1:%2 (%3) — %4")
+                        .arg(m_config.host)
+                        .arg(m_config.port)
+                        .arg(addressFamilyLabel(m_config.family), tried));
+        return;
+    }
+
+    const QHostAddress address = m_addresses.at(m_addressIndex++);
+    m_currentAttempt = describeAddress(address, m_config.port);
+
     m_socket = m_factory();
+    if (!m_socket) {
+        attemptFailed(QStringLiteral("socket factory returned null"));
+        return;
+    }
     m_socket->setParent(this);
 
     connect(m_socket, &QAbstractSocket::connected, this, &IrcConnection::onConnected);
@@ -85,22 +248,54 @@ void IrcConnection::connectToServer(const ConnectionConfig& config) {
 
     if (auto* ssl = qobject_cast<QSslSocket*>(m_socket)) {
         connect(ssl, &QSslSocket::sslErrors, this, &IrcConnection::onSslErrors);
+        connect(ssl, &QSslSocket::encrypted, this, &IrcConnection::onEncrypted);
         // IRC servers commonly present self-signed certs; accept them.
         ssl->setPeerVerifyMode(QSslSocket::VerifyNone);
-        if (config.useTls) {
-            ssl->connectToHostEncrypted(config.host, config.port);
-        } else {
-            ssl->connectToHost(config.host, config.port);
-        }
-    } else {
-        m_socket->connectToHost(config.host, config.port);
+        // TLS identity (SNI, and the verification name if it were enabled)
+        // stays the *host name* even though we connect to a resolved address:
+        // for an IPv6 literal that is the literal itself, never a bracket form.
+        ssl->setPeerVerifyName(m_config.host);
+    } else if (m_config.useTls) {
+        attemptFailed(QStringLiteral("socket does not support TLS"));
+        return;
     }
 
-    setState(ConnectionState::Connecting);
+    m_socket->connectToHost(address, m_config.port);
+    m_attemptTimer->start(kConnectTimeoutMs);
+}
+
+void IrcConnection::attemptFailed(const QString& reason) {
+    const QString attempt = m_currentAttempt.isEmpty() ? m_config.host : m_currentAttempt;
+    m_failedAttempts << QStringLiteral("%1: %2").arg(attempt, reason);
+
+    // With a single candidate the final summary says it all; with several,
+    // each failure is worth showing so a dual-stack diagnosis is possible.
+    if (m_addresses.size() > 1) {
+        emit errorOccurred(
+            QStringLiteral("Connection attempt to %1 failed: %2").arg(attempt, reason));
+    }
+
+    m_attemptTimer->stop();
+    dropSocket();
+    tryNextAddress();
+}
+
+void IrcConnection::failConnect(const QString& summary) {
+    m_attemptTimer->stop();
+    dropSocket();
+    m_failedAttempts.clear();
+    m_addresses.clear();
+    m_addressIndex = 0;
+    setState(ConnectionState::Disconnected);
+    emit errorOccurred(summary);
 }
 
 void IrcConnection::disconnectFromServer(const QString& quitMessage) {
-    if (!m_socket) {
+    // Still resolving, or the TCP/TLS handshake never completed: nothing to
+    // say goodbye with, just drop it.
+    if (m_state == ConnectionState::Connecting || !m_socket ||
+        m_socket->state() != QAbstractSocket::ConnectedState) {
+        teardown();
         setState(ConnectionState::Disconnected);
         return;
     }
@@ -148,7 +343,32 @@ bool IrcConnection::sendCommand(const QByteArray& command,
 }
 
 void IrcConnection::onConnected() {
-    // TCP/TLS established. Begin IRC registration handshake.
+    // TCP is up. With TLS the handshake still has to run before any IRC line
+    // may be written, so registration waits for onEncrypted().
+    if (m_config.useTls) {
+        if (auto* ssl = qobject_cast<QSslSocket*>(m_socket)) {
+            ssl->startClientEncryption();
+            return; // handshake outcome arrives via encrypted()/errorOccurred()
+        }
+        attemptFailed(QStringLiteral("socket does not support TLS"));
+        return;
+    }
+    onTransportReady();
+}
+
+void IrcConnection::onEncrypted() {
+    onTransportReady();
+}
+
+void IrcConnection::onTransportReady() {
+    if (!m_socket) {
+        return;
+    }
+    m_attemptTimer->stop();
+    m_peerEndpoint = describeAddress(m_socket->peerAddress(), m_config.port);
+    emit transportConnected(m_peerEndpoint);
+
+    // Begin IRC registration handshake.
     if (!m_config.password.isEmpty()) {
         sendRaw("PASS " + m_config.password.toUtf8());
     }
@@ -176,17 +396,19 @@ void IrcConnection::sendRegistration() {
 }
 
 void IrcConnection::onDisconnected() {
-    if (m_socket) {
-        m_socket->deleteLater();
-        m_socket = nullptr;
-    }
+    dropSocket();
     m_buffer.clear();
     m_saslTimer->stop();
+    m_attemptTimer->stop();
     m_saslState = SaslState::Disabled;
+    m_peerEndpoint.clear();
     setState(ConnectionState::Disconnected);
 }
 
 void IrcConnection::onReadyRead() {
+    if (!m_socket) {
+        return;
+    }
     m_buffer += m_socket->readAll();
     processBuffer();
 }
@@ -219,11 +441,10 @@ void IrcConnection::handleLine(const QByteArray& line) {
     Message msg = std::move(result.value());
 
     // PING: reply with the exact token text (RFC 2812: echo everything after
-    // "PING" back in a PONG).
+    // "PING" back in a PONG). Rebuilt from the parsed params rather than the
+    // raw line, so IRCv3 tags in front of the command cannot leak into it.
     if (msg.command == "PING") {
-        QByteArray reply = msg.raw;
-        reply.replace(0, 4, "PONG");
-        sendRaw(reply);
+        sendCommand("PONG", msg.params);
     }
 
     // Route CAP/AUTHENTICATE/SASL numerics into the negotiation state machine
@@ -309,14 +530,33 @@ void IrcConnection::finishSasl() {
     sendRegistration();
 }
 
+void IrcConnection::onAttemptTimeout() {
+    if (m_state != ConnectionState::Connecting) {
+        return;
+    }
+    attemptFailed(QStringLiteral("timed out after %1 s").arg(kConnectTimeoutMs / 1000));
+}
+
 void IrcConnection::onSocketError(QAbstractSocket::SocketError err) {
     Q_UNUSED(err);
-    emit errorOccurred(m_socket ? m_socket->errorString() : QString());
+    if (!m_socket) {
+        return;
+    }
+    const QString reason = m_socket->errorString();
+
+    if (m_state == ConnectionState::Connecting && m_addresses.size() > 0) {
+        // Still hunting for a working address: record and try the next one.
+        if (m_socket->state() == QAbstractSocket::UnconnectedState) {
+            attemptFailed(reason);
+        }
+        return;
+    }
+
+    emit errorOccurred(reason);
 
     // A failed connection attempt never emits disconnected(); normalize here.
     if (m_socket && m_socket->state() == QAbstractSocket::UnconnectedState &&
-        (m_state == ConnectionState::Connecting ||
-         m_state == ConnectionState::Registering)) {
+        m_state == ConnectionState::Registering) {
         onDisconnected();
     }
 }

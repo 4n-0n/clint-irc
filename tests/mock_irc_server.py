@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Minimal IRC server for integration-testing the clint client.
 
+Binds 127.0.0.1 by default; pass --host ::1 (or set MOCK_HOST=::1) to serve an
+IPv6-only endpoint, which is what the client's IPv6 path needs to be tested
+against.
 Accepts one connection, logs every received line to LOG_FILE (env, default
 mock_server.log), and drives a registration handshake:
   NICK/USER -> 001 welcome + PING
@@ -19,8 +22,14 @@ import os
 import socket
 import sys
 
-HOST = "127.0.0.1"
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 6667
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+host_arg = None
+for i, a in enumerate(sys.argv):
+    if a == "--host" and i + 1 < len(sys.argv):
+        host_arg = sys.argv[i + 1]
+
+HOST = host_arg or os.environ.get("MOCK_HOST", "127.0.0.1")
+PORT = int(args[0]) if args else 6667
 LOG = os.environ.get("MOCK_LOG", "mock_server.log")
 
 def log(line):
@@ -33,11 +42,18 @@ def send(sock, line):
 
 def main():
     open(LOG, "w").close()  # truncate
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Pick the socket family from the bind address, so ::1 really is IPv6-only.
+    family, socktype, proto, _name, sockaddr = socket.getaddrinfo(
+        HOST, PORT, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE
+    )[0]
+    srv = socket.socket(family, socktype, proto)
+    if family == socket.AF_INET6:
+        srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((HOST, PORT))
+    srv.bind(sockaddr)
     srv.listen(1)
-    log(f"listening on {HOST}:{PORT}")
+    log(f"listening on [{HOST}]:{PORT}" if family == socket.AF_INET6
+        else f"listening on {HOST}:{PORT}")
 
     conn, addr = srv.accept()
     log(f"accepted {addr}")
@@ -87,8 +103,13 @@ def main():
                         send(conn, ":srv 903 * :SASL authentication successful")
                 elif cmd == "JOIN":
                     chan = parts[1] if len(parts) > 1 else ""
+                    send(conn, f":srv 332 {nick} {chan} :Welcome to {chan} - be nice")
                     send(conn, f":srv 353 {nick} = {chan} :{nick} @opnick +voice")
                     send(conn, f":srv 366 {nick} {chan} :End of /NAMES list.")
+                    # Exercise the client's MODE handling: op a nick in the list.
+                    send(conn, f":srv MODE {chan} +o opnick")
+                    send(conn, f":srv MODE {chan} +v {nick}")
+                    send(conn, f":srv TOPIC {chan} :Welcome to {chan} - be nice")
                 elif cmd == "LIST":
                     send(conn, f":srv 321 {nick} Channel :Users Name")
                     send(conn, f":srv 322 {nick} #general 42 :General discussion")

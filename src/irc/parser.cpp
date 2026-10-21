@@ -42,6 +42,19 @@ Result<Message, ParseError> parseLine(const QByteArray& line) {
     const char* p = line.constData();
     const char* end = p + line.size();
 
+    // 0. Optional IRCv3 message tags: "@key=value;key2 :prefix COMMAND ...".
+    //    The tag section runs to the next space and is only stored (the client
+    //    does not request tags, but a server may still send them).
+    if (p < end && *p == '@') {
+        const char* space = static_cast<const char*>(std::memchr(p, ' ', end - p));
+        if (space == nullptr) {
+            // Tags but no message: malformed.
+            return Result<Message, ParseError>::err(ParseError::NoCommand);
+        }
+        msg.tagsRaw = QByteArray(p + 1, static_cast<int>(space - p) - 1);
+        p = space + 1;
+    }
+
     // 1. Optional prefix: a line starting with ':' whose prefix runs to the
     //    next space.
     if (p < end && *p == ':') {

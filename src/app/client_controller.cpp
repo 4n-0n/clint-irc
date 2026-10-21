@@ -1,6 +1,7 @@
 #include "client_controller.hpp"
 
 #include "../irc/ctcp.hpp"
+#include "../irc/encoder.hpp"
 #include "../irc/prefix.hpp"
 #include "../ui/chat_formatter.hpp"
 
@@ -29,18 +30,47 @@ bool isNumericCommand(const QByteArray& command) {
     return true;
 }
 
+// Sends `text` as one or more "<command> <target> :<chunk>" lines so every line
+// fits the 512-byte IRC limit. The encoder clips over-long lines, so a long
+// message would otherwise lose its tail instead of arriving in full.
+void sendTextLines(irc::IrcConnection& conn, const QByteArray& command,
+                   const QString& target, const QByteArray& text) {
+    const QByteArray t = target.toUtf8();
+    const int budget = irc::trailingParamBudget(command, {t});
+    for (const QByteArray& chunk : irc::splitText(text, budget)) {
+        conn.sendRaw(irc::encodeCommand(command, {t, chunk}));
+    }
+}
+
+// Sends a CTCP payload (e.g. an ACTION), split over several lines when long,
+// each chunk still framed by its own \x01 ... \x01 so it stays valid CTCP.
+void sendCtcpActionLines(irc::IrcConnection& conn, const QString& target,
+                         const QByteArray& text) {
+    const QByteArray t = target.toUtf8();
+    const QByteArray tag = "ACTION";
+    const int overhead = 1 + tag.size() + 1 + 1; // \x01 + tag + space + \x01
+    const int budget = irc::trailingParamBudget("PRIVMSG", {t}) - overhead;
+    for (const QByteArray& chunk : irc::splitText(text, budget)) {
+        conn.sendRaw(irc::encodeCommand("PRIVMSG", {t, irc::ctcp::encode(tag, chunk)}));
+    }
+}
+
 } // namespace
 
 ClientController::ClientController(QObject* parent) : QObject(parent) {
     connect(&m_conn, &irc::IrcConnection::messageReceived, this, &ClientController::onMessage);
     connect(&m_conn, &irc::IrcConnection::stateChanged, this, &ClientController::onStateChanged);
     connect(&m_conn, &irc::IrcConnection::errorOccurred, this, &ClientController::onSocketError);
+    connect(&m_conn, &irc::IrcConnection::transportConnected, this,
+            &ClientController::transportConnected);
 }
 
 void ClientController::connectToServer(const irc::ConnectionConfig& config) {
     m_nick = config.nick;
     m_channels.clear();
     m_prefixSymbols = QStringLiteral("@+"); // RFC 1459 default; updated by 005
+    m_prefixModes = QStringLiteral("ov");
+    m_nickRetries = 0;
     m_conn.connectToServer(config);
 }
 
@@ -64,26 +94,31 @@ QStringList ClientController::channels() const {
 // ---- Outgoing primitives -------------------------------------------------
 
 void ClientController::sendChat(const QString& target, const QString& text) {
-    m_conn.sendCommand("PRIVMSG", {target.toUtf8(), text.toUtf8()});
+    sendTextLines(m_conn, "PRIVMSG", target, text.toUtf8());
 }
 
 void ClientController::sendAction(const QString& target, const QString& text) {
-    m_conn.sendCommand("PRIVMSG",
-                       {target.toUtf8(), irc::ctcp::encode("ACTION", text.toUtf8())});
+    sendCtcpActionLines(m_conn, target, text.toUtf8());
 }
 
 void ClientController::sendNotice(const QString& target, const QString& text) {
-    m_conn.sendCommand("NOTICE", {target.toUtf8(), text.toUtf8()});
+    sendTextLines(m_conn, "NOTICE", target, text.toUtf8());
 }
 
 void ClientController::sendCtcp(const QString& target, const QString& tag,
                                 const QString& argument) {
+    // CTCP arguments are single tokens (a PING timestamp, a VERSION string):
+    // never split them, or the payload would no longer parse.
     m_conn.sendCommand("PRIVMSG",
                        {target.toUtf8(), irc::ctcp::encode(tag.toUtf8(), argument.toUtf8())});
 }
 
-void ClientController::joinChannel(const QString& channel) {
-    m_conn.sendCommand("JOIN", {channel.toUtf8()});
+void ClientController::joinChannel(const QString& channel, const QString& key) {
+    if (key.isEmpty()) {
+        m_conn.sendCommand("JOIN", {channel.toUtf8()});
+    } else {
+        m_conn.sendCommand("JOIN", {channel.toUtf8(), key.toUtf8()});
+    }
 }
 
 void ClientController::partChannel(const QString& channel, const QString& reason) {
@@ -176,29 +211,35 @@ void ClientController::handleNumeric(const irc::Message& msg) {
         emit serverMessage(ui::formatServerLine(msg));
         break;
     }
-    case 5: { // RPL_ISUPPORT: parse "PREFIX=(ov)@+" into the prefix symbols.
+    case 5: { // RPL_ISUPPORT: parse "PREFIX=(ov)@+" into letters + symbols.
         for (int i = 1; i < msg.params.size(); ++i) {
             const QByteArray token = msg.params[i];
             if (token.startsWith("PREFIX=")) {
                 const QByteArray value = token.mid(7); // after "PREFIX="
                 const int close = value.indexOf(')');
+                const int open = value.indexOf('(');
                 if (close >= 0) {
                     m_prefixSymbols = QString::fromUtf8(value.mid(close + 1));
+                    if (open >= 0 && open < close) {
+                        // Letters line up with the symbols: (ov)@+ -> o=@, v=+.
+                        m_prefixModes = QString::fromUtf8(value.mid(open + 1, close - open - 1));
+                    }
                 }
             }
         }
         emit serverMessage(ui::formatServerLine(msg));
         break;
     }
+    case 331: { // RPL_NOTOPIC: [nick, channel, "No topic is set"]
+        if (msg.params.size() >= 2) {
+            setChannelTopic(channelKey(QString::fromUtf8(msg.params[1])), QString());
+        }
+        break;
+    }
     case 332: { // RPL_TOPIC: [nick, channel, topic]
         if (msg.params.size() >= 3) {
-            const QString key = channelKey(QString::fromUtf8(msg.params[1]));
-            if (m_channels.contains(key)) {
-                const QString chan = m_channels.value(key).displayName;
-                const QString topic = QString::fromUtf8(msg.params[2]);
-                emit channelMessage(chan, ui::formatSystem(
-                    QStringLiteral("Topic is: %1").arg(topic)));
-            }
+            setChannelTopic(channelKey(QString::fromUtf8(msg.params[1])),
+                            QString::fromUtf8(msg.params[2]));
         }
         break;
     }
@@ -219,10 +260,18 @@ void ClientController::handleNumeric(const irc::Message& msg) {
         }
         break;
     }
-    case 433: { // ERR_NICKNAMEINUSE: auto-append '_' and retry once.
-        m_nick += QStringLiteral("_");
-        m_conn.sendCommand("NICK", {m_nick.toUtf8()});
-        emit ownNickChanged(m_nick);
+    case 433: { // ERR_NICKNAMEINUSE. While registering, retry with one '_'
+                // appended (bounded); afterwards a failed /nick is reported as
+                // is — silently renaming the user would be surprising.
+        const bool registering = m_conn.state() == irc::ConnectionState::Registering;
+        if (registering && m_nickRetries < 3) {
+            ++m_nickRetries;
+            m_nick += QStringLiteral("_");
+            m_conn.sendCommand("NICK", {m_nick.toUtf8()});
+            emit ownNickChanged(m_nick);
+        } else {
+            emit errorOccurred(QStringLiteral("Nick %1 is already in use.").arg(m_nick));
+        }
         emit serverMessage(ui::formatServerLine(msg));
         break;
     }
@@ -330,6 +379,8 @@ void ClientController::handleJoin(const irc::Message& msg) {
         st.displayName = chan;
         m_channels.insert(key, st);
         emit channelJoined(chan);
+        // A re-join starts with no known topic until 332/331 arrives.
+        emit channelTopicChanged(chan, QString());
     } else if (m_channels.contains(key)) {
         addNick(key, nick, QString());
         emitNickList(key);
@@ -408,7 +459,7 @@ void ClientController::handleNick(const irc::Message& msg) {
 }
 
 void ClientController::handleMode(const irc::Message& msg) {
-    if (msg.params.size() < 2) {
+    if (msg.params.isEmpty()) {
         return;
     }
     const QString target = QString::fromUtf8(msg.params[0]);
@@ -416,19 +467,89 @@ void ClientController::handleMode(const irc::Message& msg) {
         const QString key = channelKey(target);
         const QString chan = m_channels.contains(key) ? m_channels.value(key).displayName
                                                       : target;
+        bool changed = false;
+        if (msg.params.size() >= 2) {
+            changed = applyChannelModes(key, msg.params[1], msg.params.mid(2));
+        }
         emit channelMessage(chan, ui::formatChannelLine(msg));
+        if (changed) {
+            emitNickList(key);
+        }
     } else {
         emit serverMessage(ui::formatServerLine(msg));
     }
 }
 
+bool ClientController::applyChannelModes(const QString& key, const QByteArray& modes,
+                                         const QList<QByteArray>& args) {
+    if (!m_channels.contains(key)) {
+        return false;
+    }
+    QList<NickEntry>& nicks = m_channels[key].nicks;
+    bool changed = false;
+    bool adding = true;
+    int argIndex = 0;
+
+    for (const char c : modes) {
+        const QChar mode = QLatin1Char(c);
+        if (mode == QLatin1Char('+')) {
+            adding = true;
+            continue;
+        }
+        if (mode == QLatin1Char('-')) {
+            adding = false;
+            continue;
+        }
+        // Modes that carry an argument. 'l' only does so when it is set.
+        const bool prefixMode = m_prefixModes.contains(mode);
+        const bool takesArg = prefixMode || QStringLiteral("beIk").contains(mode) ||
+                              (mode == QLatin1Char('l') && adding);
+        QByteArray arg;
+        if (takesArg) {
+            arg = args.value(argIndex++);
+        }
+        if (!prefixMode || arg.isEmpty()) {
+            continue;
+        }
+        const int symbolIndex = m_prefixModes.indexOf(mode);
+        if (symbolIndex < 0 || symbolIndex >= m_prefixSymbols.size()) {
+            continue;
+        }
+        const QChar symbol = m_prefixSymbols.at(symbolIndex);
+        const QString nick = QString::fromUtf8(arg);
+        for (NickEntry& e : nicks) {
+            if (e.nick.compare(nick, Qt::CaseInsensitive) == 0) {
+                const QString updated =
+                    irc::applyPrefixSymbol(e.prefix, m_prefixSymbols, symbol, adding);
+                if (updated != e.prefix) {
+                    e.prefix = updated;
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    return changed;
+}
+
+void ClientController::setChannelTopic(const QString& key, const QString& topic) {
+    if (!m_channels.contains(key)) {
+        return;
+    }
+    m_channels[key].topic = topic;
+    emit channelTopicChanged(m_channels.value(key).displayName, topic);
+}
+
 void ClientController::handleTopic(const irc::Message& msg) {
-    if (msg.params.size() < 2) {
+    if (msg.params.isEmpty()) {
         return;
     }
     const QString chan = QString::fromUtf8(msg.params[0]);
     const QString key = channelKey(chan);
     if (m_channels.contains(key)) {
+        const QString topic =
+            msg.params.size() >= 2 ? QString::fromUtf8(msg.params[1]) : QString();
+        setChannelTopic(key, topic);
         emit channelMessage(m_channels.value(key).displayName, ui::formatChannelLine(msg));
     } else {
         emit serverMessage(ui::formatServerLine(msg));
@@ -492,7 +613,10 @@ void ClientController::emitNickList(const QString& key) {
     QStringList display;
     display.reserve(m_channels[key].nicks.size());
     for (const NickEntry& e : m_channels[key].nicks) {
-        display << (e.prefix + e.nick);
+        // Show only the highest-rank prefix: the client does not negotiate
+        // multi-prefix, so "@+nick" would just be noise. The full set is kept
+        // in the state, so a -o leaves the '+' behind correctly.
+        display << (e.prefix.left(1) + e.nick);
     }
     emit nickListChanged(m_channels.value(key).displayName, display);
 }

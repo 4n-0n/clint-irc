@@ -19,6 +19,19 @@ const char* const kPalette[] = {
     "#a3be8c", "#b48ead", "#88c0d0", "#d08770", "#ebcb8b", "#bf616a",
 };
 
+// FNV-1a over the lowercased UTF-8 bytes. qHash() must not be used here: Qt
+// seeds it randomly per process, which would give a nick a different color on
+// every launch. Case is folded so "Alice" and "alice" match, and the result is
+// stable across platforms and runs.
+quint32 stableNickHash(const QString& nick) {
+    quint32 hash = 2166136261u;
+    for (const char c : nick.toCaseFolded().toUtf8()) {
+        hash ^= static_cast<quint8>(c);
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 bool isNumericCommand(const QByteArray& command) {
     if (command.size() != 3) {
         return false;
@@ -93,7 +106,7 @@ QString nickColor(const QString& nick) {
         return QStringLiteral("#cccccc");
     }
     const size_t n = sizeof(kPalette) / sizeof(kPalette[0]);
-    return QString::fromLatin1(kPalette[qHash(nick) % n]);
+    return QString::fromLatin1(kPalette[stableNickHash(nick) % n]);
 }
 
 QString htmlEscape(const QString& text) {

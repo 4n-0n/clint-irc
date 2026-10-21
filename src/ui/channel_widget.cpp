@@ -11,6 +11,7 @@
 #include <QContextMenuEvent>
 #include <QHBoxLayout>
 #include <QDesktopServices>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -33,6 +34,21 @@ void ChannelWidget::setHistory(InputHistory* history) {
 }
 
 void ChannelWidget::setupUi() {
+    // Topic bar: a single muted line under the tab, above the chat. Hidden until
+    // the server provides a topic (332/TOPIC).
+    m_topicLabel = new QLabel(this);
+    m_topicLabel->setObjectName(QStringLiteral("topicLabel"));
+    m_topicLabel->setTextFormat(Qt::PlainText);
+    m_topicLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // Wrap instead of stretching the window, but never take more than two lines
+    // away from the chat: the full text stays in the tooltip.
+    m_topicLabel->setWordWrap(true);
+    m_topicLabel->setMaximumHeight(m_topicLabel->fontMetrics().lineSpacing() * 2 + 10);
+    m_topicLabel->setStyleSheet(
+        QStringLiteral("QLabel { background:#252526; color:#b8b8b8;"
+                       " border-bottom:1px solid #3c3c3c; padding:4px 6px; }"));
+    m_topicLabel->setVisible(false);
+
     m_chatView = new QTextEdit(this);
     m_chatView->setReadOnly(true);
     m_chatView->setAcceptRichText(true);
@@ -77,6 +93,7 @@ void ChannelWidget::setupUi() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
+    root->addWidget(m_topicLabel, 0);
     root->addLayout(chatAndNicks, 1);
     root->addWidget(m_input, 0);
 
@@ -156,6 +173,16 @@ void ChannelWidget::setNickList(const QStringList& nicks) {
     applyNickFilter();
 }
 
+void ChannelWidget::setTopic(const QString& topic) {
+    if (m_context != Context::Channel) {
+        m_topicLabel->setVisible(false);
+        return;
+    }
+    m_topicLabel->setText(topic);
+    m_topicLabel->setToolTip(topic);
+    m_topicLabel->setVisible(!topic.isEmpty());
+}
+
 void ChannelWidget::applyNickFilter() {
     const QString needle = m_nickFilter->text().trimmed();
 
@@ -212,19 +239,37 @@ bool ChannelWidget::onChatMouseRelease(const QPoint& viewportPos) {
         return true;
     }
 
-    const QString nick = nickAt(viewportPos);
-    if (!nick.isEmpty()) {
-        m_pendingNick = nick;
-        m_nickClickTimer->start();
-        return true;
+    const QString href = m_chatView->anchorAt(viewportPos);
+    if (href.isEmpty()) {
+        return false; // plain text: not ours
     }
 
-    const QString href = m_chatView->anchorAt(viewportPos);
+    if (href.startsWith(QLatin1String("nick:"))) {
+        const QString nick = QUrl::fromPercentEncoding(href.mid(5).toUtf8());
+        if (!nick.isEmpty()) {
+            m_pendingNick = nick;
+            m_nickClickTimer->start();
+            return true;
+        }
+        return false;
+    }
+
+    // Channel names in the /list tab are joins: one click is enough there, the
+    // list is read-only and the intent is unambiguous.
+    if (href.startsWith(QLatin1String("join:"))) {
+        const QString channel = QUrl::fromPercentEncoding(href.mid(5).toUtf8());
+        if (!channel.isEmpty()) {
+            emit channelActivated(channel);
+            return true;
+        }
+        return false;
+    }
+
     if (href.startsWith(QLatin1String("http://")) || href.startsWith(QLatin1String("https://"))) {
         QDesktopServices::openUrl(QUrl(href));
         return true;
     }
-    return false; // plain text: not ours
+    return false;
 }
 
 bool ChannelWidget::onChatMouseDoubleClick(const QPoint& viewportPos) {

@@ -2,6 +2,8 @@
 #include <QCommandLineParser>
 #include <QTimer>
 
+#include <cstdio>
+
 #include "app/client_controller.hpp"
 #include "irc/connection.hpp"
 #include "irc/connection_config.hpp"
@@ -19,11 +21,17 @@ int main(int argc, char** argv) {
     parser.addVersionOption();
 
     QCommandLineOption serverOpt(QStringList{"s", "server"},
-                                 QStringLiteral("IRC server host"), QStringLiteral("host"));
+                                 QStringLiteral("IRC server host. Accepts host, host:port, "
+                                                "[IPv6] and [IPv6]:port"),
+                                 QStringLiteral("host"));
     QCommandLineOption portOpt(QStringList{"p", "port"},
                                QStringLiteral("IRC server port"), QStringLiteral("port"),
                                QStringLiteral("6667"));
     QCommandLineOption tlsOpt(QStringList{"tls"}, QStringLiteral("Use TLS/SSL"));
+    QCommandLineOption ipv6Opt(QStringList{"6", "ipv6"},
+                               QStringLiteral("Resolve and connect over IPv6 only"));
+    QCommandLineOption ipv4Opt(QStringList{"4", "ipv4"},
+                               QStringLiteral("Resolve and connect over IPv4 only"));
     QCommandLineOption nickOpt(QStringList{"n", "nick"},
                                QStringLiteral("Nickname"), QStringLiteral("nick"),
                                QStringLiteral("clint_user"));
@@ -44,6 +52,8 @@ int main(int argc, char** argv) {
     parser.addOption(serverOpt);
     parser.addOption(portOpt);
     parser.addOption(tlsOpt);
+    parser.addOption(ipv6Opt);
+    parser.addOption(ipv4Opt);
     parser.addOption(nickOpt);
     parser.addOption(channelOpt);
     parser.addOption(saslUserOpt);
@@ -68,10 +78,17 @@ int main(int argc, char** argv) {
     }
 
     if (parser.isSet(serverOpt)) {
+        if (parser.isSet(ipv6Opt) && parser.isSet(ipv4Opt)) {
+            std::fprintf(stderr, "clint: --ipv6 and --ipv4 are mutually exclusive\n");
+            return 2;
+        }
         irc::ConnectionConfig cfg;
         cfg.host = parser.value(serverOpt);
         cfg.port = static_cast<quint16>(parser.value(portOpt).toUInt());
         cfg.useTls = parser.isSet(tlsOpt);
+        cfg.family = parser.isSet(ipv6Opt)   ? irc::AddressFamily::IPv6
+                     : parser.isSet(ipv4Opt) ? irc::AddressFamily::IPv4
+                                             : irc::AddressFamily::Any;
         cfg.nick = parser.value(nickOpt);
         cfg.realName = cfg.nick;
         cfg.saslUser = parser.value(saslUserOpt);

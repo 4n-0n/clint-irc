@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include <QWidget>
 
+class QLabel;
 class QListWidget;
 class QLineEdit;
 class QTextEdit;
@@ -34,6 +35,9 @@ public:
     void appendHtml(const QString& html);
     void clear();
     void setNickList(const QStringList& nicks);
+    // Channel topic shown above the chat. An empty topic hides the bar. Only
+    // channel tabs have one; other contexts ignore the call.
+    void setTopic(const QString& topic);
 
 signals:
     void inputSubmitted(const QString& text);
@@ -45,6 +49,9 @@ signals:
     // `action` is a semantic token ("query", "whois", "kick", "op", ...);
     // `nick` is the clean nick. The caller resolves it against the tab.
     void nickContextAction(const QString& action, const QString& nick);
+    // Emitted when the user clicks a channel name in the channel-list tab. The
+    // caller joins it.
+    void channelActivated(const QString& channel);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -75,6 +82,7 @@ private:
     Context m_context;
     QString m_title;
     QTextEdit* m_chatView = nullptr;
+    QLabel* m_topicLabel = nullptr;
     QLineEdit* m_nickFilter = nullptr;
     QListWidget* m_nickList = nullptr;
     HistoryLineEdit* m_input = nullptr;

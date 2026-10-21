@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
         s.setValue(QStringLiteral("host"), QStringLiteral("irc.example.com"));
         s.setValue(QStringLiteral("port"), 7000);
         s.setValue(QStringLiteral("tls"), false);
+        s.setValue(QStringLiteral("family"), 2); // IPv6 only (combo index)
         s.setValue(QStringLiteral("nick"), QStringLiteral("tester"));
         s.setValue(QStringLiteral("user"), QStringLiteral("tuser"));
         s.setValue(QStringLiteral("realname"), QStringLiteral("Test Real"));
@@ -40,8 +41,29 @@ int main(int argc, char** argv) {
     ok = ok && (c.user == QStringLiteral("tuser"));
     ok = ok && (c.realName == QStringLiteral("Test Real"));
     ok = ok && (c.saslUser == QStringLiteral("saslme"));
+    ok = ok && (c.family == irc::AddressFamily::IPv6);
     ok = ok && (c.autoJoinChannels ==
                 QStringList{QStringLiteral("#a"), QStringLiteral("#b")});
+
+    // An IPv6 endpoint typed into the Server field: brackets are stripped and
+    // the embedded port wins over the port field, without touching the socket
+    // layer's expectations.
+    {
+        QSettings s;
+        s.setValue(QStringLiteral("host"), QStringLiteral("[2001:db8::5]:6697"));
+        s.setValue(QStringLiteral("port"), 6667);
+        s.setValue(QStringLiteral("family"), 0);
+    }
+    {
+        ui::ConnectDialog v6Dialog;
+        const irc::ConnectionConfig v6 = v6Dialog.config();
+        ok = ok && (v6.host == QStringLiteral("2001:db8::5"));
+        ok = ok && (v6.port == 6697);
+        ok = ok && (v6.family == irc::AddressFamily::IPv6);
+        if (!(v6.host == QStringLiteral("2001:db8::5") && v6.port == 6697)) {
+            std::printf("ipv6 dialog: host=%s port=%d\n", qPrintable(v6.host), v6.port);
+        }
+    }
 
     if (!ok) {
         std::printf("host=%s port=%d tls=%d nick=%s user=%s realname=%s channels=%s\n",

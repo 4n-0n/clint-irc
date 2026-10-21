@@ -6,10 +6,6 @@ namespace irc {
 
 namespace {
 
-// Largest payload a single IRC line may carry: 512 bytes including CRLF
-// (RFC 2812 section 2.3) leaves 510 bytes of content.
-constexpr int kMaxContentLength = kMaxLineLength - 2;
-
 // Reduces `maxLen` so the cut does not split a UTF-8 multibyte sequence:
 // while the byte at the cut position is a continuation byte (10xxxxxx), step
 // back to its lead byte.
@@ -47,6 +43,64 @@ QByteArray encodeCommand(const QByteArray& command, const QList<QByteArray>& par
     }
 
     return out;
+}
+
+int trailingParamBudget(const QByteArray& command,
+                        const QList<QByteArray>& middleParams,
+                        int maxContent) {
+    int used = command.size();
+    for (const QByteArray& p : middleParams) {
+        used += 1 + p.size(); // separating space + param
+    }
+    used += 2; // " :" in front of the free-text parameter
+    return maxContent - used;
+}
+
+QList<QByteArray> splitText(const QByteArray& text, int budget) {
+    QList<QByteArray> chunks;
+    if (text.isEmpty()) {
+        chunks << QByteArray();
+        return chunks;
+    }
+    if (budget <= 0) {
+        chunks << text; // cannot split usefully; the encoder clips it
+        return chunks;
+    }
+
+    int offset = 0;
+    const int size = text.size();
+    while (offset < size) {
+        // Separator consumed by the previous cut.
+        while (offset < size && text.at(offset) == ' ') {
+            ++offset;
+        }
+        if (offset >= size) {
+            break;
+        }
+
+        const int remaining = size - offset;
+        int take = utf8SafeLength(text.mid(offset), std::min(remaining, budget));
+
+        if (take < remaining) {
+            // Prefer breaking at the last space inside the window, so words are
+            // not cut in half; a single word longer than the budget is hard-cut.
+            const int space = text.lastIndexOf(' ', offset + take - 1);
+            if (space > offset && space - offset <= take) {
+                take = space - offset;
+            }
+        }
+        if (take <= 0) {
+            take = 1; // cannot happen for valid UTF-8; never loop forever
+        }
+
+        chunks << text.mid(offset, take);
+        offset += take;
+    }
+
+    if (chunks.isEmpty()) {
+        chunks << QByteArray();
+    }
+    return chunks;
 }
 
 QByteArray withCrlf(const QByteArray& line) {

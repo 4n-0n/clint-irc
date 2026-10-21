@@ -2,6 +2,7 @@
 
 #include "../app/client_controller.hpp"
 #include "../irc/connection_config.hpp"
+#include "../irc/endpoint.hpp"
 #include "chat_formatter.hpp"
 #include "connect_dialog.hpp"
 #include "fun_actions.hpp"
@@ -17,6 +18,7 @@
 #include <QTabWidget>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUrl>
 
 namespace {
 
@@ -50,20 +52,7 @@ void MainWindow::setupUi() {
     });
 
     connect(m_tabs, &QTabWidget::tabCloseRequested, this, [this](int index) {
-        QWidget* w = m_tabs->widget(index);
-        if (w == m_serverTab) {
-            return;
-        }
-        auto* tab = qobject_cast<ChannelWidget*>(w);
-        if (!tab) {
-            return;
-        }
-        if (tab->context() == ChannelWidget::Context::Channel) {
-            m_controller->partChannel(tab->title());
-        }
-        m_tabIndex.remove(tab->title().toLower());
-        m_tabs->removeTab(index);
-        tab->deleteLater();
+        closeTab(qobject_cast<ChannelWidget*>(m_tabs->widget(index)));
     });
 
     // Selecting a tab clears its activity marker (●/★).
@@ -128,9 +117,13 @@ void MainWindow::wireController() {
     connect(m_controller, &app::ClientController::channelHighlighted, this, &MainWindow::onChannelHighlighted);
     connect(m_controller, &app::ClientController::channelJoined, this, &MainWindow::onChannelJoined);
     connect(m_controller, &app::ClientController::channelParted, this, &MainWindow::onChannelParted);
+    connect(m_controller, &app::ClientController::channelTopicChanged, this,
+            &MainWindow::onChannelTopic);
     connect(m_controller, &app::ClientController::nickListChanged, this, &MainWindow::onNickList);
     connect(m_controller, &app::ClientController::ownNickChanged, this, &MainWindow::onOwnNick);
     connect(m_controller, &app::ClientController::errorOccurred, this, &MainWindow::onError);
+    connect(m_controller, &app::ClientController::transportConnected, this,
+            &MainWindow::onTransportConnected);
     connect(m_controller, &app::ClientController::listStarted, this, &MainWindow::onListStarted);
     connect(m_controller, &app::ClientController::listEntry, this, &MainWindow::onListEntry);
     connect(m_controller, &app::ClientController::listEnded, this, &MainWindow::onListEnded);
@@ -156,7 +149,10 @@ QString MainWindow::stateText(irc::ConnectionState state) const {
 }
 
 void MainWindow::onStateChanged(irc::ConnectionState state) {
-    statusBar()->showMessage(stateText(state));
+    if (state == irc::ConnectionState::Disconnected) {
+        m_peerText.clear();
+    }
+    updateStatus(state);
     m_connectAction->setEnabled(state == irc::ConnectionState::Disconnected);
     m_disconnectAction->setEnabled(state != irc::ConnectionState::Disconnected);
 
@@ -183,7 +179,12 @@ void MainWindow::onQueryMessage(const QString& peer, const QString& html) {
     ChannelWidget* tab =
         findOrCreateTab(ChannelWidget::Context::Query, peer, peer.toLower());
     tab->appendHtml(html);
-    markActivity(tab, false);
+    // A private message is addressed to us: mark it like a mention and flash
+    // the taskbar entry when the window is not the active one.
+    markActivity(tab, true);
+    if (!isActiveWindow()) {
+        QApplication::alert(this);
+    }
 }
 
 void MainWindow::onChannelHighlighted(const QString& channel) {
@@ -210,6 +211,12 @@ void MainWindow::onChannelParted(const QString& channel) {
     appendToServer(formatSystem(QStringLiteral("Left %1").arg(channel)));
 }
 
+void MainWindow::onChannelTopic(const QString& channel, const QString& topic) {
+    if (ChannelWidget* tab = findTab(channel.toLower())) {
+        tab->setTopic(topic);
+    }
+}
+
 void MainWindow::onNickList(const QString& channel, const QStringList& nicks) {
     if (ChannelWidget* tab = findTab(channel.toLower())) {
         tab->setNickList(nicks);
@@ -224,12 +231,28 @@ void MainWindow::onError(const QString& message) {
     appendToServer(formatSystem(QStringLiteral("Error: %1").arg(message)));
 }
 
+void MainWindow::onTransportConnected(const QString& peer) {
+    // Show the address actually reached, which is what confirms an IPv6-only
+    // (or the IPv6 half of a dual-stack) server.
+    m_peerText = peer;
+    appendToServer(formatSystem(QStringLiteral("Connected to %1").arg(peer)));
+    updateStatus(irc::ConnectionState::Registering);
+}
+
+void MainWindow::updateStatus(irc::ConnectionState state) {
+    const QString text = m_peerText.isEmpty()
+                             ? stateText(state)
+                             : QStringLiteral("%1 - %2").arg(stateText(state), m_peerText);
+    statusBar()->showMessage(text);
+}
+
 void MainWindow::onListStarted() {
     ChannelWidget* tab = findOrCreateTab(ChannelWidget::Context::List,
                                          QStringLiteral("channel list"),
                                          QStringLiteral("channel list"));
     tab->clear();
-    tab->appendHtml(formatSystem(QStringLiteral("Fetching channel list...")));
+    tab->appendHtml(formatSystem(
+        QStringLiteral("Fetching channel list... click a channel name to join it.")));
 }
 
 void MainWindow::onListEntry(const QString& channel, int users, const QString& topic) {
@@ -237,11 +260,15 @@ void MainWindow::onListEntry(const QString& channel, int users, const QString& t
     if (!tab) {
         return;
     }
+    // The channel name is a "join:" anchor: ChannelWidget turns a click on it
+    // into channelActivated(), which joins the channel.
+    const QString href =
+        QStringLiteral("join:") + QString::fromLatin1(QUrl::toPercentEncoding(channel));
     const QString line =
-        QStringLiteral("<span style=\"color:#61afef\">%1</span>"
-                       " <span style=\"color:#9aa0a6\">(%2)</span>"
-                       " <span style=\"color:#d4d4d4\">%3</span>")
-            .arg(htmlEscape(channel))
+        QStringLiteral("<a href=\"%1\" style=\"color:#61afef; text-decoration:none;\">%2</a>"
+                       " <span style=\"color:#9aa0a6\">(%3)</span>"
+                       " <span style=\"color:#d4d4d4\">%4</span>")
+            .arg(href, htmlEscape(channel))
             .arg(users)
             .arg(htmlEscape(topic));
     tab->appendHtml(line);
@@ -268,9 +295,11 @@ void MainWindow::onConnectAction() {
         return;
     }
     closeTabsExceptServer();
-    appendToServer(formatSystem(QStringLiteral("Connecting to %1:%2 ...")
-                                    .arg(cfg.host)
-                                    .arg(cfg.port)));
+    QString target = irc::formatEndpoint(cfg.host, cfg.port);
+    if (cfg.family != irc::AddressFamily::Any) {
+        target += QStringLiteral(" via %1").arg(irc::addressFamilyLabel(cfg.family));
+    }
+    appendToServer(formatSystem(QStringLiteral("Connecting to %1 ...").arg(target)));
     m_controller->connectToServer(cfg);
 }
 
@@ -351,8 +380,27 @@ ChannelWidget* MainWindow::findOrCreateTab(ChannelWidget::Context ctx,
     });
     connect(tab, &ChannelWidget::nickActivated, this, &MainWindow::openQueryForNick);
     connect(tab, &ChannelWidget::nickContextAction, this, &MainWindow::onNickContextAction);
+    connect(tab, &ChannelWidget::channelActivated, this, [this](const QString& channel) {
+        if (!m_controller->isConnected()) {
+            appendToServer(formatSystem(QStringLiteral("Not connected.")));
+            return;
+        }
+        m_controller->joinChannel(channel);
+    });
     m_tabs->setCurrentWidget(tab);
     return tab;
+}
+
+void MainWindow::closeTab(ChannelWidget* tab) {
+    if (!tab || tab == m_serverTab || m_tabs->indexOf(tab) < 0) {
+        return;
+    }
+    if (tab->context() == ChannelWidget::Context::Channel && m_controller->isConnected()) {
+        m_controller->partChannel(tab->title());
+    }
+    m_tabIndex.remove(tab->title().toLower());
+    m_tabs->removeTab(m_tabs->indexOf(tab));
+    tab->deleteLater();
 }
 
 ChannelWidget* MainWindow::findTab(const QString& key) const {
@@ -466,17 +514,26 @@ void MainWindow::handleSlashCommand(ChannelWidget* tab, const QString& text) {
         m_controller->sendNotice(target, msg);
     } else if (cmd == QLatin1String("join") || cmd == QLatin1String("j")) {
         const QString chan = rest.section(QLatin1Char(' '), 0, 0);
+        const QString key = rest.section(QLatin1Char(' '), 1, 1);
         if (chan.isEmpty()) {
-            appendToServer(formatSystem(QStringLiteral("Usage: /join #channel")));
+            appendToServer(formatSystem(QStringLiteral("Usage: /join #channel [key]")));
             return;
         }
-        m_controller->joinChannel(chan);
+        m_controller->joinChannel(chan, key);
     } else if (cmd == QLatin1String("part") || cmd == QLatin1String("leave")) {
         if (tab->context() != ChannelWidget::Context::Channel) {
             appendToServer(formatSystem(QStringLiteral("Not in a channel.")));
             return;
         }
         m_controller->partChannel(tab->title(), rest);
+    } else if (cmd == QLatin1String("close")) {
+        if (tab == m_serverTab) {
+            appendToServer(formatSystem(QStringLiteral("The server tab cannot be closed.")));
+            return;
+        }
+        closeTab(tab);
+    } else if (cmd == QLatin1String("clear")) {
+        tab->clear();
     } else if (cmd == QLatin1String("quit") || cmd == QLatin1String("exit")) {
         m_controller->quit(rest);
     } else if (cmd == QLatin1String("nick")) {
@@ -604,9 +661,11 @@ void MainWindow::handleSlashCommand(ChannelWidget* tab, const QString& text) {
 void MainWindow::showHelp() {
     const QString help = QStringLiteral(
         "<b>Commands:</b><br>"
-        "/join #channel &nbsp;&nbsp; Join a channel<br>"
-        "/list [filter] &nbsp;&nbsp; List channels<br>"
+        "/join #channel [key] &nbsp;&nbsp; Join a channel<br>"
+        "/list [filter] &nbsp;&nbsp; List channels (click one to join)<br>"
         "/part [reason] &nbsp;&nbsp; Leave the current channel<br>"
+        "/close &nbsp;&nbsp; Close the current tab<br>"
+        "/clear &nbsp;&nbsp; Clear the current tab's log<br>"
         "/msg &lt;nick&gt; &lt;msg&gt; &nbsp;&nbsp; Private message<br>"
         "/me &lt;action&gt; &nbsp;&nbsp; Send an action<br>"
         "/notice &lt;target&gt; &lt;msg&gt; &nbsp;&nbsp; Send a notice<br>"
